@@ -19,7 +19,7 @@ $ rustup component add rustfmt
 Install `cargo-snippet`
 
 ```bash
-$ cargo install cargo-snippet --features="binaries"
+$ cargo install --git https://github.com/paruma/cargo-snippet.git --branch main --features="binaries"
 ```
 
 ## Usage

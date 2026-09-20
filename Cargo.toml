@@ -1,8 +1,8 @@
 [package]
 name = "cargo-snippet"
-version = "0.6.5"
+version = "0.6.6"
 authors = ["hatoo <hato2000@gmail.com>"]
-repository = "https://github.com/hatoo/cargo-snippet.git"
+repository = "https://github.com/paruma/cargo-snippet.git"
 keywords = ["subcommand", "cargo-subcommand", "cargo", "snippet", "competitive"]
 license = "MIT"
 readme = "README.md"

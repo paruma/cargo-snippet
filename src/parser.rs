@@ -388,15 +388,19 @@ fn format_doc_comment(doc_tt: TokenTree, is_inner: bool, doc_hidden: bool) -> Op
         .captures(doc.as_str())
         .and_then(|caps| caps.get(1))
         .map(|c| {
-            c.as_str().lines().fold(String::new(), |mut acc, line| {
-                let s = if is_inner {
-                    format!("//!{}\n", line)
-                } else {
-                    format!("///{}\n", line)
-                };
-                acc.push_str(&s);
-                acc
-            })
+            let doc = c.as_str();
+            std::iter::once(doc)
+                .filter(|line| line.is_empty())
+                .chain(doc.lines())
+                .fold(String::new(), |mut acc, line| {
+                    let s = if is_inner {
+                        format!("//!{}\n", line)
+                    } else {
+                        format!("///{}\n", line)
+                    };
+                    acc.push_str(&s);
+                    acc
+                })
         })
 }
 
@@ -928,6 +932,26 @@ use std::str::FromStr;")]
     }
 
     #[test]
+    fn test_empty_outer_line_doc() {
+        let src = r#"
+            /// This is the first paragraph.
+            ///
+            /// This is the second paragraph.
+            #[snippet]
+            fn foo() {}
+        "#;
+
+        let snip = snippets(&src);
+        assert_eq!(
+            format_src(snip["foo"].as_str()).unwrap(),
+            format_src(
+                "/// This is the first paragraph.\n///\n/// This is the second paragraph.\nfn foo() {}"
+            )
+            .unwrap(),
+        );
+    }
+
+    #[test]
     fn test_outer_block_doc() {
         let src = r#"
 /** This is outer doc comment.
@@ -971,6 +995,27 @@ fn foo() {}
         assert_eq!(
             format_src(snip["foo"].as_str()).unwrap(),
             format_src("fn foo() {\n//! This is inner doc comment.\n}").unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_empty_inner_line_doc() {
+        let src = r#"
+            #[snippet]
+            fn foo() {
+                //! This is the first paragraph.
+                //!
+                //! This is the second paragraph.
+            }
+        "#;
+
+        let snip = snippets(&src);
+        assert_eq!(
+            format_src(snip["foo"].as_str()).unwrap(),
+            format_src(
+                "fn foo() {\n    //! This is the first paragraph.\n    //!\n    //! This is the second paragraph.\n}"
+            )
+            .unwrap(),
         );
     }
 
