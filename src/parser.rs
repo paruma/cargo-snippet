@@ -2,6 +2,7 @@ use lazy_static::lazy_static;
 use proc_macro2::{Delimiter, TokenStream, TokenTree};
 use quote::ToTokens;
 use regex::{Captures, Regex};
+use syn::spanned::Spanned;
 use syn::{parse_file, Attribute, File, Item, Meta, MetaList, NestedMeta};
 
 use crate::snippet::{Snippet, SnippetAttributes};
@@ -404,10 +405,67 @@ fn format_doc_comment(doc_tt: TokenTree, is_inner: bool, doc_hidden: bool) -> Op
         })
 }
 
-fn stringify_tokens(tokens: TokenStream, doc_hidden: bool) -> String {
+fn source_indent(src: &str, start: usize) -> &str {
+    let before = match src.get(..start) {
+        Some(before) => before,
+        None => return "",
+    };
+    let prefix = &before[before.rfind('\n').map_or(0, |i| i + 1)..];
+    if prefix.chars().all(|ch| ch == ' ' || ch == '\t') {
+        prefix
+    } else {
+        ""
+    }
+}
+
+fn original_macro_body(group: &proc_macro2::Group, src: &str, base_indent: &str) -> Option<String> {
+    let body = src.get(group.span().byte_range())?;
+    let delimiters = match group.delimiter() {
+        Delimiter::Brace => ('{', '}'),
+        Delimiter::Parenthesis => ('(', ')'),
+        Delimiter::Bracket => ('[', ']'),
+        Delimiter::None => return None,
+    };
+    if body.starts_with(delimiters.0) && body.ends_with(delimiters.1) {
+        let mut lines = body.split('\n');
+        let mut result = lines.next()?.to_owned();
+        for line in lines {
+            result.push('\n');
+            // A nested item may become the root of a snippet, so remove its old base indent.
+            result.push_str(line.strip_prefix(base_indent).unwrap_or(line));
+        }
+        Some(result)
+    } else {
+        None
+    }
+}
+
+fn stringify_tokens(tokens: TokenStream, doc_hidden: bool, src: &str, base_indent: &str) -> String {
     let mut res = String::new();
     let mut iter = tokens.into_iter().peekable();
     while let Some(tok) = iter.next() {
+        if matches!(&tok, TokenTree::Ident(ident) if ident == "macro_rules") {
+            let mut ahead = iter.clone();
+            if let (
+                Some(TokenTree::Punct(bang)),
+                Some(TokenTree::Ident(name)),
+                Some(TokenTree::Group(body)),
+            ) = (ahead.next(), ahead.next(), ahead.next())
+            {
+                // Raw source would retain documentation comments hidden by the token serializer.
+                if bang.as_char() == '!' && !doc_hidden {
+                    if let Some(original) = original_macro_body(&body, src, base_indent) {
+                        iter = ahead;
+                        res.push_str("macro_rules! ");
+                        res.push_str(&name.to_string());
+                        res.push(' ');
+                        res.push_str(&original);
+                        res.push(' ');
+                        continue;
+                    }
+                }
+            }
+        }
         match tok {
             TokenTree::Punct(ref punct) => {
                 if punct.as_char() == '!' && iter.peek().map(next_token_is_doc).unwrap_or(false) {
@@ -445,7 +503,7 @@ fn stringify_tokens(tokens: TokenStream, doc_hidden: bool) -> String {
                     Delimiter::Bracket => res.push('['),
                     Delimiter::None => (),
                 }
-                res.push_str(stringify_tokens(g.stream(), doc_hidden).as_str());
+                res.push_str(stringify_tokens(g.stream(), doc_hidden, src, base_indent).as_str());
                 match g.delimiter() {
                     Delimiter::Parenthesis => res.push(')'),
                     Delimiter::Brace => res.push('}'),
@@ -464,40 +522,40 @@ fn stringify_tokens(tokens: TokenStream, doc_hidden: bool) -> String {
 }
 
 // Get snippet names and snippet code (not formatted)
-fn get_snippet_from_item(mut item: Item) -> Option<Snippet> {
+fn get_snippet_from_item(mut item: Item, src: &str) -> Option<Snippet> {
     let default_name = get_default_snippet_name(&item);
     let snip_attrs = get_attrs(&item).and_then(|attrs| parse_attrs(attrs.as_slice(), default_name));
 
     snip_attrs.map(|attrs| {
         remove_snippet_attr(&mut item);
         let doc_hidden = attrs.doc_hidden;
+        let base_indent = source_indent(src, item.span().byte_range().start);
         Snippet {
             attrs,
-            content: stringify_tokens(item.into_token_stream(), doc_hidden),
+            content: stringify_tokens(item.into_token_stream(), doc_hidden, src, base_indent),
         }
     })
 }
 
-fn get_snippet_from_item_recursive(item: Item) -> Vec<Snippet> {
+fn get_snippet_from_item_recursive(item: Item, src: &str) -> Vec<Snippet> {
     let mut res = Vec::new();
 
-    if let Some(pair) = get_snippet_from_item(item.clone()) {
+    if let Some(pair) = get_snippet_from_item(item.clone(), src) {
         res.push(pair);
     }
 
     if let Item::Mod(mod_item) = item {
-        res.extend(
-            mod_item
-                .content
+        res.extend(mod_item.content.into_iter().flat_map(|(_, items)| {
+            items
                 .into_iter()
-                .flat_map(|(_, items)| items.into_iter().flat_map(get_snippet_from_item_recursive)),
-        );
+                .flat_map(|item| get_snippet_from_item_recursive(item, src))
+        }));
     }
 
     res
 }
 
-fn get_snippet_from_file(file: File) -> Vec<Snippet> {
+fn get_snippet_from_file(file: File, src: &str) -> Vec<Snippet> {
     let mut res = Vec::new();
 
     // whole code is snippet
@@ -514,21 +572,21 @@ fn get_snippet_from_file(file: File) -> Vec<Snippet> {
         let doc_hidden = attrs.doc_hidden;
         res.push(Snippet {
             attrs,
-            content: stringify_tokens(file.into_token_stream(), doc_hidden),
+            content: stringify_tokens(file.into_token_stream(), doc_hidden, src, ""),
         })
     }
 
     res.extend(
         file.items
             .into_iter()
-            .flat_map(get_snippet_from_item_recursive),
+            .flat_map(|item| get_snippet_from_item_recursive(item, src)),
     );
 
     res
 }
 
 pub fn parse_snippet(src: &str) -> Result<Vec<Snippet>, syn::parse::Error> {
-    parse_file(src).map(get_snippet_from_file)
+    parse_file(src).map(|file| get_snippet_from_file(file, src))
 }
 
 #[cfg(test)]
@@ -1201,6 +1259,81 @@ fn foo() {}
             format_src(snip["foo"].as_str()).unwrap(),
             format_src("fn foo() {\n//! [　] <- full width space\n}").unwrap(),
         );
+    }
+
+    #[test]
+    fn test_preserve_macro_rules_line_breaks_in_module() {
+        let src = r#"
+            #[snippet]
+            mod macros {
+                macro_rules! complicated {
+                    ($( $name:ident => $value:expr ),*) => {
+                        $(
+                            // Keep this comment with the macro body.
+                            let $name = $value;
+                        )*
+                    };
+                }
+            }
+        "#;
+
+        let snip = snippets(src);
+        let formatted = format_src(&snip["macros"]).unwrap();
+        let unindented = src
+            .replace("#[snippet]", "")
+            .lines()
+            .map(|line| line.strip_prefix("            ").unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let expected = format_src(&unindented).unwrap();
+        assert_eq!(formatted, expected);
+        assert!(formatted.contains("\n                // Keep this comment with the macro body.\n"));
+    }
+
+    #[test]
+    fn test_preserve_macro_rules_line_breaks_as_snippet() {
+        let src = r#"
+            #[snippet(name = "complicated")]
+            macro_rules! complicated {
+                ($name:ident) => {
+                    fn $name() {
+                        println!("{}", stringify!($name));
+                    }
+                };
+            }
+        "#;
+
+        let snip = snippets(src);
+        let formatted = format_src(&snip["complicated"]).unwrap();
+        let unindented = src
+            .replace("#[snippet(name = \"complicated\")]", "")
+            .lines()
+            .map(|line| line.strip_prefix("            ").unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let expected = format_src(&unindented).unwrap();
+        assert_eq!(formatted, expected);
+        assert!(formatted.lines().count() > 5);
+    }
+
+    #[test]
+    fn test_doc_hidden_inside_macro_rules() {
+        let src = r#"
+            #[snippet(doc_hidden)]
+            mod macros {
+                macro_rules! complicated {
+                    () => {
+                        /// Hidden documentation.
+                        fn example() {}
+                    };
+                }
+            }
+        "#;
+
+        let snip = snippets(src);
+        let formatted = format_src(&snip["macros"]).unwrap();
+        assert!(!formatted.contains("Hidden documentation"));
+        assert!(formatted.contains("macro_rules! complicated"));
     }
 
     #[test]
