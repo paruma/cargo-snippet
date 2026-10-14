@@ -521,18 +521,147 @@ fn stringify_tokens(tokens: TokenStream, doc_hidden: bool, src: &str, base_inden
     res
 }
 
+fn snippet_attr_ranges(attrs: &[Attribute], ranges: &mut Vec<std::ops::Range<usize>>) {
+    for attr in attrs {
+        if attr
+            .parse_meta()
+            .map(|meta| is_snippet_path(&meta.path().to_token_stream().to_string()))
+            .unwrap_or(false)
+        {
+            ranges.push(attr.span().byte_range());
+        }
+    }
+}
+
+fn collect_snippet_attr_ranges(item: &Item, ranges: &mut Vec<std::ops::Range<usize>>) {
+    if let Some(attrs) = get_attrs(item) {
+        snippet_attr_ranges(attrs, ranges);
+    }
+    if let Item::Mod(item_mod) = item {
+        if let Some((_, items)) = &item_mod.content {
+            for item in items {
+                collect_snippet_attr_ranges(item, ranges);
+            }
+        }
+    }
+}
+
+fn leading_comment_start(src: &str, item_start: usize) -> usize {
+    // Ordinary comments are not part of a syn item's span. Attach the contiguous
+    // comment block immediately before the item, stopping at a blank or code line.
+    let mut start = src[..item_start].rfind('\n').map_or(0, |i| i + 1);
+    while start > 0 {
+        let previous_end = start - 1;
+        let previous_start = src[..previous_end].rfind('\n').map_or(0, |i| i + 1);
+        let line = src[previous_start..previous_end].trim();
+        if line.starts_with("//") && !line.starts_with("///") && !line.starts_with("//!")
+            || line.starts_with("////")
+        {
+            start = previous_start;
+        } else if line.ends_with("*/") {
+            let bytes = src[..previous_end].as_bytes();
+            let mut depth = 0;
+            let mut opening = None;
+            for i in (0..bytes.len().saturating_sub(1)).rev() {
+                match &bytes[i..i + 2] {
+                    b"*/" => depth += 1,
+                    b"/*" => {
+                        depth -= 1;
+                        if depth == 0 {
+                            opening = Some(i);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let Some(opening) = opening else { break };
+            let opening_line = src[..opening].rfind('\n').map_or(0, |i| i + 1);
+            if !src[opening_line..opening].trim().is_empty() {
+                break;
+            }
+            start = opening_line;
+        } else {
+            break;
+        }
+    }
+    start
+}
+
+fn original_source(
+    src: &str,
+    range: std::ops::Range<usize>,
+    attrs: &[std::ops::Range<usize>],
+    base_indent: &str,
+) -> Option<String> {
+    let mut content = src.get(range.clone())?.to_owned();
+    let mut attrs = attrs.to_vec();
+    attrs.sort_by_key(|attr| attr.start);
+    // Remove from the end so the original byte offsets stay valid. A standalone
+    // attribute takes its newline with it; comments on the same line stay.
+    for attr in attrs.iter().rev() {
+        if range.start > attr.start || attr.end > range.end {
+            continue;
+        }
+        let line_start = src[..attr.start].rfind('\n').map_or(0, |i| i + 1);
+        let line_end = src[attr.end..]
+            .find('\n')
+            .map_or(src.len(), |i| attr.end + i);
+        let whole_line = line_start >= range.start
+            && src[line_start..attr.start].trim().is_empty()
+            && src[attr.end..line_end].trim().is_empty();
+        let (start, end) = if whole_line {
+            (
+                line_start,
+                (line_end + usize::from(line_end < src.len())).min(range.end),
+            )
+        } else {
+            (attr.start, attr.end)
+        };
+        content.replace_range(start - range.start..end - range.start, "");
+    }
+    Some(
+        content
+            .lines()
+            .map(|line| line.strip_prefix(base_indent).unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim_start_matches('\n')
+            .to_owned(),
+    )
+}
+
 // Get snippet names and snippet code (not formatted)
 fn get_snippet_from_item(mut item: Item, src: &str) -> Option<Snippet> {
     let default_name = get_default_snippet_name(&item);
     let snip_attrs = get_attrs(&item).and_then(|attrs| parse_attrs(attrs.as_slice(), default_name));
 
     snip_attrs.map(|attrs| {
+        let mut removed_attrs = Vec::new();
+        collect_snippet_attr_ranges(&item, &mut removed_attrs);
+        let item_span = item.span().byte_range();
+        let base_indent = source_indent(src, item_span.start);
+        let line_end = src[item_span.end..]
+            .find('\n')
+            .map_or(src.len(), |n| item_span.end + n);
+        let trailing_comment = src[item_span.end..line_end].trim_start().starts_with("//")
+            || src[item_span.end..line_end].trim_start().starts_with("/*");
+        let source_range = leading_comment_start(src, item_span.start)..if trailing_comment {
+            line_end
+        } else {
+            item_span.end
+        };
         remove_snippet_attr(&mut item);
         let doc_hidden = attrs.doc_hidden;
-        let base_indent = source_indent(src, item.span().byte_range().start);
         Snippet {
             attrs,
-            content: stringify_tokens(item.into_token_stream(), doc_hidden, src, base_indent),
+            content: if doc_hidden {
+                stringify_tokens(item.into_token_stream(), true, src, base_indent)
+            } else {
+                original_source(src, source_range, &removed_attrs, base_indent).unwrap_or_else(
+                    || stringify_tokens(item.into_token_stream(), false, src, base_indent),
+                )
+            },
         }
     })
 }
@@ -561,6 +690,11 @@ fn get_snippet_from_file(file: File, src: &str) -> Vec<Snippet> {
     // whole code is snippet
     if let Some(attrs) = parse_attrs(&file.attrs, None) {
         let mut file = file.clone();
+        let mut removed_attrs = Vec::new();
+        snippet_attr_ranges(&file.attrs, &mut removed_attrs);
+        for item in &file.items {
+            collect_snippet_attr_ranges(item, &mut removed_attrs);
+        }
         file.attrs.retain(|attr| {
             attr.parse_meta()
                 .map(|m| !is_snippet_path(m.path().to_token_stream().to_string().as_str()))
@@ -572,7 +706,12 @@ fn get_snippet_from_file(file: File, src: &str) -> Vec<Snippet> {
         let doc_hidden = attrs.doc_hidden;
         res.push(Snippet {
             attrs,
-            content: stringify_tokens(file.into_token_stream(), doc_hidden, src, ""),
+            content: if doc_hidden {
+                stringify_tokens(file.into_token_stream(), true, src, "")
+            } else {
+                original_source(src, 0..src.len(), &removed_attrs, "")
+                    .unwrap_or_else(|| stringify_tokens(file.into_token_stream(), false, src, ""))
+            },
         })
     }
 
@@ -984,9 +1123,117 @@ use std::str::FromStr;")]
         let snip = snippets(&src);
         assert_eq!(
             format_src(snip["foo"].as_str()).unwrap(),
-            format_src("/// This is outer doc comment. (exactly three slashes)\nfn foo() {}")
+            format_src("/// This is outer doc comment. (exactly three slashes)\n// This is *NOT* doc comment.\n//// This is also *NOT* doc comment.\nfn foo() {}")
                 .unwrap(),
         );
+    }
+
+    #[test]
+    fn test_preserve_regular_comments() {
+        let src = r#"
+/* Leading comment
+   with a second line. */
+// Explain the function.
+#[snippet]
+fn foo() {
+    let url = "https://example.com"; // Trailing comment.
+    // Standalone comment.
+    let value = 1; /* Inline block comment. */
+    let _ = (url, value);
+} // Comment after the item.
+        "#;
+
+        let output = format_src(&snippets(src)["foo"]).unwrap();
+        for comment in [
+            "/* Leading comment",
+            "// Explain the function.",
+            "// Trailing comment.",
+            "// Standalone comment.",
+            "/* Inline block comment. */",
+            "// Comment after the item.",
+        ] {
+            assert_eq!(output.matches(comment).count(), 1, "{output}");
+        }
+        assert!(output.contains("https://example.com"));
+        assert!(!output.contains("#[snippet]"));
+    }
+
+    #[test]
+    fn test_preserve_comments_in_nested_and_file_snippets() {
+        let src = r#"
+#![snippet("file")]
+// File comment.
+#[snippet]
+mod parent {
+    // Child comment.
+    #[snippet]
+    fn child() {
+        /* Body comment. */
+    }
+}
+"#;
+        let snips = snippets(src);
+        let file = format_src(&snips["file"]).unwrap();
+        let parent = format_src(&snips["parent"]).unwrap();
+        let child = format_src(&snips["child"]).unwrap();
+        assert!(file.contains("// File comment."));
+        assert!(file.contains("// Child comment."));
+        assert!(parent.contains("// Child comment."));
+        assert!(child.contains("// Child comment."));
+        assert!(child.contains("/* Body comment. */"));
+        for output in [&file, &parent, &child] {
+            assert!(!output.contains("#[snippet]"));
+            assert!(!output.contains("#![snippet"));
+        }
+    }
+
+    #[test]
+    fn test_preserve_comments_around_inline_attribute() {
+        let src = r##"
+#[snippet] // Comment after the attribute.
+fn foo() {
+    let text = "#[snippet] // inside a string";
+    let _ = text;
+}
+"##;
+        let output = format_src(&snippets(src)["foo"]).unwrap();
+        assert!(output.contains("// Comment after the attribute."));
+        assert!(output.contains("#[snippet] // inside a string"));
+    }
+
+    #[test]
+    fn test_preserve_comments_with_multiple_same_line_attrs() {
+        let src = r#"
+/* 外側コメント
+   /* 入れ子コメント */
+   続き */
+#[snippet("first")] #[snippet("second")] // 属性の後のコメント
+fn foo() {}
+fn unrelated() {}
+"#;
+        let snips = snippets(src);
+        for name in ["first", "second"] {
+            let output = format_src(&snips[name]).unwrap();
+            assert!(output.contains("/* 外側コメント"), "{}", output);
+            assert!(output.contains("/* 入れ子コメント */"), "{}", output);
+            assert!(output.contains("// 属性の後のコメント"), "{}", output);
+            assert!(output.contains("fn foo()"), "{}", output);
+            assert!(!output.contains("#[snippet"), "{}", output);
+            assert!(!output.contains("unrelated"), "{}", output);
+        }
+    }
+
+    #[test]
+    fn test_preserve_multiline_snippet_attribute_with_unicode() {
+        let src = r#"
+#[snippet(
+    name = "日本語",
+)]
+fn foo() {}
+"#;
+        let output = format_src(&snippets(src)["日本語"]).unwrap();
+        assert!(output.contains("fn foo() {}"));
+        assert!(!output.contains("#[snippet"));
     }
 
     #[test]
@@ -1029,10 +1276,14 @@ fn foo() {}
             format_src(snip["foo"].as_str()).unwrap(),
             format_src(
                 r#"
-/// This is outer doc comment.
-///doc comment1
-///* doc comment2
-/// doc comment finishes here!
+/** This is outer doc comment.
+doc comment1
+* doc comment2
+ doc comment finishes here! */
+/*
+NOT doc comment
+*/
+/*** NOT doc comment */
 fn foo() {}
 "#
             )
@@ -1099,10 +1350,14 @@ NOT doc comment
             format_src(
                 r#"
 fn foo() {
-//! This is inner doc comment.
-//!doc comment1
-//!* doc comment2
-//! doc comment finishes here!
+/*! This is inner doc comment.
+doc comment1
+* doc comment2
+ doc comment finishes here! */
+/*
+NOT doc comment
+*/
+/*** NOT doc comment */
 }
 "#
             )
@@ -1241,7 +1496,7 @@ fn foo() {}
         let snip = snippets(&src);
         assert_eq!(
             format_src(snip["foo"].as_str()).unwrap(),
-            format_src("///\n///[　] <- full width space\nfn foo() {}").unwrap(),
+            format_src("/** \n[　] <- full width space\n*/\nfn foo() {}").unwrap(),
         );
     }
 
@@ -1350,7 +1605,7 @@ fn foo() {
         let snip = snippets(&src);
         assert_eq!(
             format_src(snip["foo"].as_str()).unwrap(),
-            format_src("fn foo() {\n//!\n//![　] <- full width space\n}").unwrap(),
+            format_src("fn foo() {\n/*!\n[　] <- full width space\n*/\n}").unwrap(),
         );
     }
 
