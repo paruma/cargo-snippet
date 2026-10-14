@@ -1,6 +1,6 @@
 [package]
 name = "cargo-snippet"
-version = "0.6.6"
+version = "0.6.7"
 authors = ["hatoo <hato2000@gmail.com>"]
 repository = "https://github.com/paruma/cargo-snippet.git"
 keywords = ["subcommand", "cargo-subcommand", "cargo", "snippet", "competitive"]
