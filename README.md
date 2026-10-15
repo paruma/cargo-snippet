@@ -1,12 +1,8 @@
 # cargo-snippet
 
-[![crates.io](https://img.shields.io/crates/v/cargo-snippet.svg)](https://crates.io/crates/cargo-snippet)
 [![CI](https://github.com/paruma/cargo-snippet/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/paruma/cargo-snippet/actions/workflows/ci.yml)
-[![dependency status](https://deps.rs/repo/github/hatoo/cargo-snippet/status.svg)](https://deps.rs/repo/github/hatoo/cargo-snippet)
 
-A snippet extractor for competitive programmers.
-
-This allows you to manage your code snippets with tests and benchmarks available !!
+This is a fork of [hatoo/cargo-snippet](https://github.com/hatoo/cargo-snippet), a snippet extractor for competitive programming.
 
 ## Installing
 
@@ -16,10 +12,10 @@ You need to install `rustfmt` to run `cargo-snippet`.
 $ rustup component add rustfmt
 ```
 
-Install `cargo-snippet`
+Install this fork from Git. It is not published on crates.io.
 
 ```bash
-$ cargo install --git https://github.com/paruma/cargo-snippet.git --branch main --features="binaries"
+$ cargo install --git https://github.com/paruma/cargo-snippet.git --features="binaries"
 ```
 
 ## Usage
@@ -34,11 +30,10 @@ Add dependencies to Cargo.toml.
 
 ```toml
 [dependencies]
-cargo-snippet = "0.6"
+cargo-snippet = { git = "https://github.com/paruma/cargo-snippet.git" }
 ```
 
-Note: `cargo-snippet` on dependencies is needed just for register `#[snippet]` attribute to prevent the error from the compiler.
-All logics that extract snippet is in the binary package which is installed by `Installing` section.
+This dependency registers the `#[snippet]` attribute so the code compiles. The installed command extracts the snippets.
 
 Then write some snippet codes and tests.
 
@@ -113,22 +108,26 @@ Extract snippet !
 
 ```
 $ cargo snippet
-snippet foo
-    use std::io::{self, Read};
-    use std::str::FromStr;
-    fn foo() {}
+snippet bar
+    use std::collections::HashMap;
+    fn bar() {}
 
 snippet documented
+    // By default, doc comments associated with items will be output with the snippet.
     /// This is a document!
     fn documented() {
         //! Inner document also works.
     }
 
-snippet bar
-    use std::collections::HashMap;
-    fn bar() {}
+snippet foo
+    use std::io::{self, Read};
+    use std::str::FromStr;
+    // You can set prefix string.
+    // Note: All codes will be formatted by rustfmt on output
+    fn foo() {}
 
 snippet gcd
+    // Annotate snippet name
     fn gcd(a: u64, b: u64) -> u64 {
         if b == 0 {
             a
@@ -138,6 +137,7 @@ snippet gcd
     }
 
 snippet gcd_list
+    // Annotate snippet name
     fn gcd(a: u64, b: u64) -> u64 {
         if b == 0 {
             a
@@ -145,16 +145,20 @@ snippet gcd_list
             gcd(b, a % b)
         }
     }
+    // Include snippet
     fn gcd_list(list: &[u64]) -> u64 {
         list.iter().fold(list[0], |a, &b| gcd(a, b))
     }
 
 snippet lcm
+    // Also works
+    // Equivalent to #[snippet("lcm")]
     fn lcm(a: u64, b: u64) -> u64 {
         a / gcd(a, b) * b
     }
 
 snippet mymath
+    // Annotate snippet name
     fn gcd(a: u64, b: u64) -> u64 {
         if b == 0 {
             a
@@ -162,15 +166,12 @@ snippet mymath
             gcd(b, a % b)
         }
     }
+    // Also works
+    // Equivalent to #[snippet("lcm")]
     fn lcm(a: u64, b: u64) -> u64 {
         a / gcd(a, b) * b
     }
-
 ```
-
-## Example
-
-My snippets [here](https://github.com/hatoo/competitive-rust-snippets.git).
 
 ## Supported output format
 
