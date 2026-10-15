@@ -1111,6 +1111,31 @@ use std::str::FromStr;")]
     }
 
     #[test]
+    fn test_comments_stay_on_their_own_lines_when_snippets_are_combined() {
+        let src = r#"
+#[snippet]
+fn dependency() {}
+
+// Comment for the next function.
+#[snippet(name = "combined", include = "dependency", prefix = "use std::cmp::Ordering;")]
+fn main_part() {}
+"#;
+        let output = format_src(&snippets(src)["combined"]).unwrap();
+        assert!(
+            output.contains("use std::cmp::Ordering;\nfn dependency() {}"),
+            "{}",
+            output
+        );
+        assert!(
+            output.contains(
+                "fn dependency() {}\n// Comment for the next function.\nfn main_part() {}"
+            ),
+            "{}",
+            output
+        );
+    }
+
+    #[test]
     fn test_outer_line_doc() {
         let src = r#"
             /// This is outer doc comment. (exactly three slashes)

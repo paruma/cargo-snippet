@@ -19,6 +19,16 @@ pub struct Snippet {
     pub content: String,
 }
 
+fn append_part(output: &mut String, part: &str) {
+    if part.is_empty() {
+        return;
+    }
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push('\n');
+    }
+    output.push_str(part);
+}
+
 pub fn process_snippets(snips: &[Snippet]) -> BTreeMap<String, String> {
     #[derive(Default, Clone, Debug)]
     struct Snip {
@@ -32,8 +42,8 @@ pub fn process_snippets(snips: &[Snippet]) -> BTreeMap<String, String> {
     for snip in snips {
         for name in &snip.attrs.names {
             let s = pre.entry(name.clone()).or_default();
-            s.prefix += &snip.attrs.prefix;
-            s.content += &snip.content;
+            append_part(&mut s.prefix, &snip.attrs.prefix);
+            append_part(&mut s.content, &snip.content);
 
             for dep in &snip.attrs.uses {
                 deps.entry(name.clone())
@@ -56,8 +66,8 @@ pub fn process_snippets(snips: &[Snippet]) -> BTreeMap<String, String> {
                 if let Some(c) = &pre.get(&dep) {
                     // *res.entry(name.clone()).or_insert_with(String::new) += c.as_str();
                     let s = res.entry(name.clone()).or_default();
-                    s.prefix += &c.prefix;
-                    s.content += &c.content;
+                    append_part(&mut s.prefix, &c.prefix);
+                    append_part(&mut s.content, &c.content);
 
                     if let Some(ds) = deps.get(&dep) {
                         for d in ds {
@@ -76,11 +86,15 @@ pub fn process_snippets(snips: &[Snippet]) -> BTreeMap<String, String> {
     for (name, snip) in pre {
         // Dependency first
         let s = res.entry(name).or_default();
-        s.prefix += snip.prefix.as_str();
-        s.content += snip.content.as_str();
+        append_part(&mut s.prefix, &snip.prefix);
+        append_part(&mut s.content, &snip.content);
     }
 
     res.into_iter()
-        .map(|(k, v)| (k, v.prefix + v.content.as_str()))
+        .map(|(k, v)| {
+            let mut output = v.prefix;
+            append_part(&mut output, &v.content);
+            (k, output)
+        })
         .collect()
 }
